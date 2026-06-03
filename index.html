@@ -1,0 +1,731 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+<title>Personaline — Gestione Abbonamenti</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0f0f13;font-family:-apple-system,'DM Sans','Segoe UI',sans-serif;color:#e8e4dc;min-height:100vh}
+input,select,button,label{font-family:inherit}
+::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:#17171d}::-webkit-scrollbar-thumb{background:#2a2a38;border-radius:3px}
+input[type=date]::-webkit-calendar-picker-indicator{filter:invert(.6)}
+input[type=number]::-webkit-inner-spin-button{opacity:.5}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+// ── STORAGE ───────────────────────────────────────────────────────────────────
+const SK="personaline_v4";
+const load=()=>{try{const r=localStorage.getItem(SK);return r?JSON.parse(r):null;}catch{return null;}};
+const save=(d)=>{try{localStorage.setItem(SK,JSON.stringify(d));}catch{}};
+
+// ── HELPERS ───────────────────────────────────────────────────────────────────
+const today=()=>new Date().toISOString().split("T")[0];
+const addDays=(s,n)=>{const d=new Date(s);d.setDate(d.getDate()+n);return d.toISOString().split("T")[0];};
+const daysLeft=(e)=>{if(!e)return null;return Math.ceil((new Date(e)-new Date())/86400000);};
+const fmt=(s)=>{if(!s)return"—";const[y,m,d]=s.split("-");return`${d}/${m}/${y}`;};
+const fmtE=(n)=>n!=null?`€${Number(n).toFixed(2).replace(".",",")}`:null;
+const ymNow=()=>{const d=new Date();return`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;};
+const ini=(name)=>name.split(" ").map(w=>w[0]).slice(0,2).join("").toUpperCase();
+let _id=Date.now();const uid=()=>String(++_id);
+
+const PM=["Cash","Carta","Bonifico","Satispay"];
+const ST=[
+  {label:"Pacchetto ingressi",hasExpiry:false,customEntries:true},
+  {label:"Mensile (30gg)",hasExpiry:true,days:30},
+  {label:"Trimestrale (90gg)",hasExpiry:true,days:90},
+];
+const getSub=(l)=>ST.find(s=>s.label===l);
+const isEP=(l)=>!getSub(l)?.hasExpiry;
+const dc=(p)=>{if(!p)return null;const s=getSub(p.subType);if(!s)return null;if(s.customEntries&&p.entries)return p.amount/p.entries;if(s.days)return p.amount/s.days;return null;};
+const MI={Cash:"💵",Carta:"💳",Bonifico:"🏦",Satispay:"📱"};
+
+const activePay=(member,date)=>{
+  const sorted=[...member.payments].sort((a,b)=>b.startDate.localeCompare(a.startDate));
+  for(const p of sorted){
+    if(p.startDate>date)continue;
+    if(!isEP(p.subType)){if(p.endDate&&p.endDate>=date)return p;}
+    else{const used=usedForPack(member.attendances,p);if(used<(p.entries||0))return p;}
+  }
+  return null;
+};
+
+// Conta ingressi usati per un pacchetto specifico:
+// - se l'attendance ha payId → conta solo quelli con payId===p.id
+// - fallback per vecchi dati senza payId → conta per intervallo date
+const usedForPack=(attendances,p)=>{
+  const byId=attendances.filter(a=>a.payId===p.id).length;
+  if(byId>0)return byId;
+  // fallback: attendance senza payId nell'intervallo del pacchetto
+  return attendances.filter(a=>!a.payId&&a.date>=p.startDate).length;
+};
+
+const mStatus=(m)=>{
+  const ps=[...m.payments].sort((a,b)=>b.startDate.localeCompare(a.startDate));
+  for(const p of ps){
+    if(!isEP(p.subType)){return{type:"time",p,dl:daysLeft(p.endDate)};}
+    else{const used=usedForPack(m.attendances,p);return{type:"entries",p,used,max:p.entries||0};}
+  }
+  return null;
+};
+
+// Stato di tutti i pacchetti attivi di un membro (per mostrare tutti i contatori)
+const allPackStatus=(m)=>{
+  return m.payments.filter(p=>isEP(p.subType)).map(p=>{
+    const used=usedForPack(m.attendances,p);
+    return{p,used,max:p.entries||0,rem:(p.entries||0)-used};
+  });
+};
+
+// ── COLORS ────────────────────────────────────────────────────────────────────
+const C={bg:"#0f0f13",surface:"#17171d",card:"#1e1e27",border:"#2a2a38",
+  accent:"#c8a96e",asoft:"#c8a96e22",text:"#e8e4dc",muted:"#8a8499",
+  danger:"#e05c5c",success:"#5cb87a",warn:"#e0a050",info:"#6ea8c8"};
+
+// ── STATE ─────────────────────────────────────────────────────────────────────
+const stored=load();
+let S={
+  members:stored?.members||[],
+  tab:stored?.tab||"members",
+  filter:stored?.filter||"all",
+  search:"",
+  expandedId:null,
+  editAttId:null,      // id membro con presenze in modalità modifica
+  showAddMember:false,
+  editMemberId:null,   // id membro in modifica nome/tel
+  showPayFor:null,
+  confirm:null,
+  alert:null,
+  calY:new Date().getFullYear(),
+  calM:new Date().getMonth(),
+  calSel:null,
+  regId:"",
+  regDate:today(),
+  regPayId:"",
+};
+
+function persist(){save({members:S.members,tab:S.tab,filter:S.filter});}
+function set(patch){Object.assign(S,patch);render();persist();}
+function setNoPersist(patch){Object.assign(S,patch);render();}
+
+// ── DOM ───────────────────────────────────────────────────────────────────────
+const h=(tag,attrs,kids)=>{
+  const e=document.createElement(tag);
+  for(const[k,v]of Object.entries(attrs||{})){
+    if(k==="style"&&typeof v==="object")Object.assign(e.style,v);
+    else if(k.startsWith("on"))e.addEventListener(k.slice(2).toLowerCase(),v);
+    else if(k==="cls")e.className=v;
+    else e.setAttribute(k,v);
+  }
+  for(const c of kids||[]){
+    if(c==null||c===false||c===undefined)continue;
+    e.appendChild(typeof c==="object"&&c instanceof Node?c:document.createTextNode(String(c)));
+  }
+  return e;
+};
+const d=(a,c)=>h("div",a,c);
+const sp=(a,c)=>h("span",a,c);
+const btn=(txt,st,onclick,extra={})=>{
+  const styles={
+    primary:{background:C.accent,color:"#1a1508",border:"none"},
+    ghost:{background:"transparent",color:C.muted,border:`1px solid ${C.border}`},
+    danger:{background:C.danger+"22",color:C.danger,border:`1px solid ${C.danger}44`},
+  };
+  const b=h("button",{style:{cursor:"pointer",borderRadius:6,fontFamily:"inherit",fontWeight:600,fontSize:extra.small?12:13,padding:extra.small?"5px 12px":"8px 18px",transition:"all .15s",...(styles[st]||{})},onClick:onclick},[txt]);
+  if(extra.disabled){b.style.opacity="0.5";b.style.cursor="not-allowed";b.removeEventListener("click",onclick);b.addEventListener("click",e=>e.preventDefault());}
+  return b;
+};
+const inp=(type,val,ph,onch,sty={})=>{
+  const i=h("input",{type,value:val,placeholder:ph,style:{background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,padding:"7px 10px",color:C.text,fontSize:13,fontFamily:"inherit",outline:"none",width:"100%",...sty}});
+  i.addEventListener("input",onch);i.addEventListener("change",onch);return i;
+};
+const sel=(val,opts,onch)=>{
+  const s=h("select",{style:{background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,padding:"7px 10px",color:C.text,fontSize:13,fontFamily:"inherit",outline:"none",width:"100%"}},
+    opts.map(o=>h("option",{value:o.value??o,...(o.value===val||o===val?{selected:""}:{})},[(o.label??o)])));
+  s.addEventListener("change",onch);return s;
+};
+const lbl=(txt)=>d({style:{color:C.muted,fontSize:11,marginBottom:4}},[txt]);
+const tag=(col,txt)=>sp({style:{display:"inline-block",padding:"2px 8px",borderRadius:4,fontSize:11,fontWeight:600,letterSpacing:".04em",background:col+"22",color:col,border:`1px solid ${col}44`}},[txt]);
+const overlay=(kids,zi=200)=>d({style:{position:"fixed",inset:0,background:"#000000aa",display:"flex",alignItems:"center",justifyContent:"center",zIndex:zi,padding:"20px"}},kids);
+
+// ── CONFIRM ───────────────────────────────────────────────────────────────────
+function renderConfirm(){
+  if(!S.confirm)return null;
+  const{msg,onOk}=S.confirm;
+  return overlay([
+    d({style:{background:C.card,borderRadius:14,padding:24,maxWidth:340,width:"100%",border:`1px solid ${C.danger}55`,textAlign:"center"}},[
+      d({style:{fontSize:32,marginBottom:10}},["🗑️"]),
+      d({style:{color:C.text,fontSize:14,lineHeight:1.6,marginBottom:20}},[msg]),
+      d({style:{display:"flex",gap:10,justifyContent:"center"}},[
+        btn("Sì, elimina","danger",()=>{onOk();setNoPersist({confirm:null});}),
+        btn("Annulla","ghost",()=>setNoPersist({confirm:null})),
+      ]),
+    ])
+  ],300);
+}
+
+// ── ALERT ─────────────────────────────────────────────────────────────────────
+function renderAlert(){
+  if(!S.alert)return null;
+  const r=S.alert.type==="renewal";
+  return overlay([
+    d({style:{background:C.card,borderRadius:16,padding:28,maxWidth:360,width:"100%",border:`2px solid ${r?C.danger:C.success}`,textAlign:"center"}},[
+      d({style:{fontSize:44,marginBottom:10}},[r?"🔔":"✅"]),
+      d({style:{color:r?C.danger:C.success,fontWeight:800,fontSize:18,marginBottom:10}},[r?"Ingressi esauriti!":"Ingresso registrato"]),
+      d({style:{color:C.text,fontSize:14,lineHeight:1.8,marginBottom:22,whiteSpace:"pre-line"}},[S.alert.message]),
+      btn(r?"Capito — rinnovo subito":"OK","primary",()=>setNoPersist({alert:null})),
+    ])
+  ]);
+}
+
+// ── ADD / EDIT MEMBER ─────────────────────────────────────────────────────────
+function renderMemberModal(){
+  const isEdit=!!S.editMemberId;
+  const existing=isEdit?S.members.find(m=>m.id===S.editMemberId):null;
+  let name=existing?.name||"", phone=existing?.phone||"";
+  const nameI=inp("text",name,"es. Giulia Rossi",e=>{name=e.target.value;});
+  const phoneI=inp("text",phone,"es. 333 0001112",e=>{phone=e.target.value;});
+  const save2=()=>{
+    if(!nameI.value.trim())return;
+    if(isEdit){
+      S.members=S.members.map(m=>m.id===S.editMemberId?{...m,name:nameI.value.trim(),phone:phoneI.value.trim()}:m);
+      set({editMemberId:null});
+    } else {
+      S.members=[...S.members,{id:uid(),name:nameI.value.trim(),phone:phoneI.value.trim(),payments:[],attendances:[]}];
+      set({showAddMember:false});
+    }
+  };
+  return overlay([
+    d({style:{background:C.card,borderRadius:14,padding:24,width:"100%",maxWidth:380,border:`1px solid ${C.accent}55`}},[
+      d({style:{color:C.accent,fontWeight:700,fontSize:16,marginBottom:16}},[isEdit?"✏ Modifica Iscritto":"✦ Nuovo Iscritto"]),
+      d({style:{marginBottom:12}},[lbl("Nome e cognome *"),nameI]),
+      d({style:{marginBottom:20}},[lbl("Telefono (opzionale)"),phoneI]),
+      d({style:{display:"flex",gap:8}},[
+        btn(isEdit?"Salva modifiche":"Aggiungi","primary",save2),
+        btn("Annulla","ghost",()=>set({showAddMember:false,editMemberId:null})),
+      ]),
+    ])
+  ]);
+}
+
+// ── PAYMENT FORM ──────────────────────────────────────────────────────────────
+function renderPaymentForm(memberId){
+  let amount="",method="Cash",subType="Pacchetto ingressi",entries="10",startDate=today(),note="";
+  const pBox=d({style:{marginTop:10,padding:"10px 12px",background:C.asoft,borderRadius:6,fontSize:12,color:C.accent,lineHeight:1.9}},["📦 Pacchetto da 10 ingressi — nessuna scadenza"]);
+  const upd=()=>{
+    const sub=getSub(subType);const numE=sub?.customEntries?parseInt(entries)||0:null;
+    const end=sub?.hasExpiry&&startDate?addDays(startDate,sub.days):null;
+    const pc=amount&&(numE||sub?.days)?(numE?parseFloat(amount)/numE:parseFloat(amount)/sub.days):null;
+    pBox.textContent=sub?.customEntries
+      ?`📦 Pacchetto da ${numE||"?"} ingressi — nessuna scadenza${pc?` · seduta: ${fmtE(pc)}`:""}`
+      :`📅 Scade il ${fmt(end)} (${sub?.days}gg)${pc?` · giorno: ${fmtE(pc)}` :""}`;
+  };
+  const amtI=inp("number","","es. 250",e=>{amount=e.target.value;upd();});
+  const subS=sel(subType,ST.map(s=>({value:s.label,label:s.label})),e=>{subType=e.target.value;upd();});
+  const methS=sel(method,PM,e=>{method=e.target.value;});
+  const entI=inp("number","10","es. 10",e=>{entries=e.target.value;upd();});
+  const dateI=inp("date",startDate,"",e=>{startDate=e.target.value;upd();});
+  const noteI=inp("text","","es. sconto prima volta...",e=>{note=e.target.value;});
+  const saveP=()=>{
+    if(!amtI.value||!startDate)return;
+    const sub=getSub(subType);const numE=sub?.customEntries?parseInt(entI.value)||0:null;
+    if(sub?.customEntries&&!numE)return;
+    const end=sub?.hasExpiry?addDays(startDate,sub.days):null;
+    const np={id:uid(),date:today(),amount:parseFloat(amtI.value),method:methS.value,subType,entries:numE,startDate,endDate:end,note:noteI.value};
+    S.members=S.members.map(m=>m.id===memberId?{...m,payments:[...m.payments,np]}:m);
+    set({showPayFor:null});
+  };
+  return d({style:{background:C.surface,border:`1px solid ${C.accent}44`,borderRadius:10,padding:16,marginTop:10}},[
+    d({style:{color:C.accent,fontWeight:700,fontSize:13,marginBottom:12}},["✦ Nuovo Pagamento"]),
+    d({style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}},[
+      d({},[lbl("Importo (€)"),amtI]),d({},[lbl("Metodo"),methS]),
+      d({},[lbl("Tipo abbonamento"),subS]),d({},[lbl("N° ingressi"),entI]),
+      d({style:{gridColumn:"1/-1"}},[lbl("Data acquisto"),dateI]),
+    ]),
+    pBox,
+    d({style:{marginTop:10}},[lbl("Note"),noteI]),
+    d({style:{display:"flex",gap:8,marginTop:14}},[
+      btn("Salva pagamento","primary",saveP),
+      btn("Annulla","ghost",()=>set({showPayFor:null})),
+    ]),
+  ]);
+}
+
+// ── MEMBER CARD ───────────────────────────────────────────────────────────────
+function renderMemberCard(m){
+  const open=S.expandedId===m.id;
+  const st=mStatus(m);const cost=st?.p?dc(st.p):null;
+  // tutti i pacchetti a ingressi con i loro contatori
+  const packStats=allPackStatus(m);
+  const eC=st?.type==="entries"?(st.max-st.used<=0?C.danger:st.max-st.used<=2?C.warn:C.success):C.info;
+  let sc=C.muted,sl="Nessun abbonamento";
+  if(st){
+    if(st.type==="entries"){const r=st.max-st.used;sc=r<=0?C.danger:r<=2?C.warn:C.success;sl=r<=0?"Ingressi esauriti 🔔":`${r} ingressi rimasti`;}
+    else{sc=st.dl<0?C.danger:st.dl<=7?C.warn:C.success;sl=st.dl<0?`Scaduto ${Math.abs(st.dl)}gg fa`:st.dl===0?"Scade oggi!":`${st.dl}gg rimasti`;}
+  }
+  const editAtt=S.editAttId===m.id;
+
+  // header row
+  const header=d({style:{display:"flex",alignItems:"center",padding:"14px 16px",cursor:"pointer",gap:12},onClick:()=>setNoPersist({expandedId:open?null:m.id,editAttId:null,showPayFor:open?null:S.showPayFor})},[
+    d({style:{width:38,height:38,borderRadius:"50%",background:C.accent+"22",border:`1.5px solid ${C.accent}55`,display:"flex",alignItems:"center",justifyContent:"center",color:C.accent,fontWeight:700,fontSize:14,flexShrink:0}},[ini(m.name)]),
+    d({style:{flex:1,minWidth:0}},[
+      d({style:{color:C.text,fontWeight:600,fontSize:14,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}},[m.name]),
+      m.phone?d({style:{color:C.muted,fontSize:11,marginTop:1}},[m.phone]):"",
+    ]),
+    cost!=null?d({style:{textAlign:"center",padding:"3px 9px",background:C.success+"14",borderRadius:7,border:`1px solid ${C.success}33`,flexShrink:0}},[
+      d({style:{color:C.success,fontWeight:800,fontSize:13,lineHeight:1}},[fmtE(cost)]),
+      d({style:{color:C.muted,fontSize:9,textTransform:"uppercase",letterSpacing:".05em"}},["/ seduta"]),
+    ]):"",
+    // mostra un badge per ogni pacchetto a ingressi
+    ...packStats.map(ps=>{
+      const pc=ps.rem<=0?C.danger:ps.rem<=2?C.warn:C.success;
+      return d({style:{textAlign:"center",padding:"3px 9px",background:pc+"18",borderRadius:7,border:`1px solid ${pc}44`,flexShrink:0}},[
+        d({style:{color:pc,fontWeight:800,fontSize:13,lineHeight:1}},[`${ps.used}/${ps.max}`]),
+        d({style:{color:C.muted,fontSize:9,textTransform:"uppercase",letterSpacing:".05em"}},[`ing.`]),
+      ]);
+    }),
+    d({style:{textAlign:"right",flexShrink:0,minWidth:90}},[
+      d({style:{color:sc,fontSize:11,fontWeight:600}},[sl]),
+      st?.p?d({style:{color:C.muted,fontSize:11,marginTop:2}},[st.p.subType]):"",
+    ]),
+    d({style:{color:C.muted,fontSize:12,marginLeft:6}},[open?"▲":"▼"]),
+  ]);
+
+  if(!open)return d({style:{background:C.card,borderRadius:12,border:`1px solid ${C.border}`,overflow:"hidden"}},[header]);
+
+  // ── STORICO PRESENZE — sempre visibile, con elimina sempre attivo ──────────
+  const delAtt=(aid)=>{
+    S.members=S.members.map(x=>x.id===m.id?{...x,attendances:x.attendances.filter(at=>at.id!==aid)}:x);
+    persist();render();
+  };
+  const sortedAtts=[...m.attendances].sort((a,b)=>b.date.localeCompare(a.date));
+  const attSection=d({style:{marginBottom:16,background:C.surface,borderRadius:8,border:`1px solid ${C.border}`,padding:"12px 14px"}},[
+    d({style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}},[
+      d({style:{color:C.accent,fontSize:12,fontWeight:700,letterSpacing:".04em"}},[
+        `📅 Storico presenze (${m.attendances.length})`
+      ]),
+      m.attendances.length>0?h("button",{style:{background:editAtt?C.warn+"22":"transparent",color:editAtt?C.warn:C.muted,border:`1px solid ${editAtt?C.warn+"55":C.border}`,borderRadius:5,padding:"3px 12px",fontSize:11,fontWeight:600,cursor:"pointer"},
+        onClick:(e)=>{e.stopPropagation();setNoPersist({editAttId:editAtt?null:m.id});}},
+        [editAtt?"✓ Chiudi":"🗑 Elimina seduta"]):"",
+    ]),
+    m.attendances.length===0
+      ? d({style:{color:C.muted,fontSize:12,textAlign:"center",padding:"8px 0"}},["Nessuna presenza registrata"])
+      : d({style:{display:"flex",gap:5,flexWrap:"wrap"}},
+          sortedAtts.slice(0,50).map(a=>{
+            if(editAtt){
+              // modalità elimina: ogni tag ha il pulsante ✕ ben visibile
+              return d({style:{display:"inline-flex",alignItems:"center",gap:4,padding:"4px 8px 4px 10px",borderRadius:6,fontSize:12,fontWeight:600,background:C.danger+"22",color:C.danger,border:`1px solid ${C.danger}55`,cursor:"default"}},[
+                fmt(a.date),
+                h("button",{
+                  style:{background:C.danger,color:"#fff",border:"none",borderRadius:4,width:18,height:18,fontSize:11,lineHeight:1,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:900,padding:0,flexShrink:0},
+                  onClick:(e)=>{e.stopPropagation();delAtt(a.id);}
+                },["✕"]),
+              ]);
+            }
+            return tag(C.info,fmt(a.date));
+          })
+        ),
+    editAtt?d({style:{marginTop:8,color:C.warn,fontSize:11}},[`Clicca ✕ sulla data da eliminare`]):"",
+  ]);
+
+  // pagamenti
+  const payRows=m.payments.length===0
+    ?d({style:{color:C.muted,fontSize:12,textAlign:"center",padding:"12px 0"}},["Nessun pagamento"])
+    :d({style:{display:"flex",flexDirection:"column",gap:8,marginBottom:12}},
+      [...m.payments].reverse().map(p=>{
+        const isE=isEP(p.subType),used=isE?usedForPack(m.attendances,p):null;
+        const rem=isE?(p.entries||0)-used:null,rc=rem===null?C.muted:rem<=0?C.danger:rem<=2?C.warn:C.success;
+        const dcc=dc(p),dl2=!isE?daysLeft(p.endDate):null,scc=dl2===null?C.muted:dl2<0?C.danger:dl2<=7?C.warn:C.success;
+        return d({style:{background:C.surface,borderRadius:8,padding:"10px 12px",border:`1px solid ${C.border}`,display:"flex",alignItems:"flex-start",gap:10}},[
+          d({style:{flex:1}},[
+            d({style:{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}},[
+              sp({style:{color:C.accent,fontWeight:700,fontSize:15}},[`€${p.amount}`]),
+              tag(C.accent,`${p.subType}${isE?` (${p.entries} ing.)`:""}`),
+              tag(p.method==="Cash"?C.success:p.method==="Carta"?C.info:C.muted,`${MI[p.method]} ${p.method}`),
+              isE?tag(rc,`${used}/${p.entries} ingressi`):"",
+              dcc!=null?tag(C.success,`${fmtE(dcc)}/seduta`):"",
+            ]),
+            d({style:{color:C.muted,fontSize:11,marginTop:6}},[
+              isE?`Acquistato il ${fmt(p.date)} · Inizio ${fmt(p.startDate)}${rem<=0?" · Esauriti 🔔":rem===1?" · Ultimo ingresso!":""}`:
+                 `Dal ${fmt(p.startDate)} al `,
+              !isE?sp({style:{color:scc,fontWeight:600}},[fmt(p.endDate)]):"",
+              !isE&&dl2!==null?sp({style:{color:scc,marginLeft:4}},[`(${dl2<0?`scaduto ${Math.abs(dl2)}gg fa`:dl2===0?"scade oggi!":`${dl2}gg rimasti`})`]):"",
+            ]),
+            p.note?d({style:{color:C.muted,fontSize:11,marginTop:3,fontStyle:"italic"}},[`📝 ${p.note}`]):"",
+          ]),
+          h("button",{style:{background:C.danger+"22",color:C.danger,border:`1px solid ${C.danger}44`,borderRadius:6,padding:"5px 12px",fontSize:12,cursor:"pointer",fontWeight:600},
+            onClick:()=>set({confirm:{msg:`Eliminare il pagamento di €${p.amount}?`,onOk:()=>{S.members=S.members.map(x=>x.id===m.id?{...x,payments:x.payments.filter(pp=>pp.id!==p.id)}:x);persist();render();}}})},"✕"),
+        ]);
+      })
+    );
+
+  const actions=S.showPayFor===m.id
+    ?renderPaymentForm(m.id)
+    :d({style:{display:"flex",gap:8,marginTop:4,flexWrap:"wrap"}},[
+        h("button",{style:{background:C.accent,color:"#1a1508",border:"none",borderRadius:6,padding:"5px 12px",fontSize:12,cursor:"pointer",fontWeight:600},onClick:()=>setNoPersist({showPayFor:m.id})},["+ Aggiungi pagamento"]),
+        h("button",{style:{background:"transparent",color:C.info,border:`1px solid ${C.info}44`,borderRadius:6,padding:"5px 12px",fontSize:12,cursor:"pointer",fontWeight:600},onClick:()=>set({editMemberId:m.id})},["✏ Modifica"]),
+        h("button",{style:{background:C.danger+"22",color:C.danger,border:`1px solid ${C.danger}44`,borderRadius:6,padding:"5px 12px",fontSize:12,cursor:"pointer",fontWeight:600},
+          onClick:()=>set({confirm:{msg:`Eliminare ${m.name} e tutti i suoi dati?`,onOk:()=>{S.members=S.members.filter(x=>x.id!==m.id);S.expandedId=null;persist();render();}}})},"🗑 Elimina"),
+      ]);
+
+  return d({style:{background:C.card,borderRadius:12,border:`1px solid ${C.accent}55`,overflow:"hidden"}},[
+    header,
+    d({style:{borderTop:`1px solid ${C.border}`,padding:"14px 16px"}},[attSection,payRows,actions]),
+  ]);
+}
+
+// ── REGISTER ──────────────────────────────────────────────────────────────────
+// Trova tutti i pacchetti attivi per una data (non solo il primo)
+function activePayments(member, date){
+  return member.payments.filter(p=>{
+    if(p.startDate>date)return false;
+    if(!isEP(p.subType))return p.endDate&&p.endDate>=date;
+    const used=usedForPack(member.attendances,p);
+    return used<(p.entries||0);
+  });
+}
+
+function renderRegister(){
+  const member=S.members.find(m=>m.id===S.regId);
+  const already=member?.attendances.some(a=>a.date===S.regDate);
+
+  // pacchetti attivi per la data selezionata
+  const activePays=member&&S.regDate?activePayments(member,S.regDate):[];
+  const multiPack=activePays.length>1;
+
+  // pacchetto selezionato: se c'è uno solo usa quello, altrimenti usa S.regPayId
+  const selPayId=multiPack?(S.regPayId||activePays[0]?.id):activePays[0]?.id;
+  const ap=activePays.find(p=>p.id===selPayId)||activePays[0]||null;
+
+  const isE=ap?isEP(ap.subType):false;
+  const used=isE&&ap?member.attendances.filter(a=>a.date>=ap.startDate&&a.date<=S.regDate).length:null;
+  const max=ap?.entries??null,rem=used!=null&&max!=null?max-used:null,cost=ap?dc(ap):null;
+  const ec=rem===null?C.info:rem<=0?C.danger:rem<=2?C.warn:C.success;
+
+  const mSel=sel(S.regId,[{value:"",label:"— Seleziona —"},...S.members.map(m=>({value:m.id,label:m.name}))],
+    e=>{S.regId=e.target.value;S.regPayId="";render();});
+  const dInp=h("input",{type:"date",value:S.regDate,style:{background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,padding:"7px 10px",color:C.text,fontSize:13,fontFamily:"inherit",outline:"none",width:"100%"}});
+  dInp.addEventListener("input",e=>{S.regDate=e.target.value;S.regPayId="";render();});
+  dInp.addEventListener("change",e=>{S.regDate=e.target.value;S.regPayId="";render();});
+
+  const canSign=!!S.regId&&!!S.regDate&&!already&&activePays.length>0;
+  const segnBtn=h("button",{style:{background:canSign?C.accent:C.muted,color:"#1a1508",border:"none",borderRadius:6,padding:"8px 18px",fontSize:13,cursor:canSign?"pointer":"not-allowed",fontWeight:600,opacity:canSign?1:.5},
+    onClick:()=>{if(!canSign)return;registerAtt(S.regId,S.regDate,selPayId);}},["Segna ✓"]);
+
+  // selector pacchetti (solo se multipli)
+  const packSelector=multiPack?d({style:{marginTop:14,padding:"12px 14px",background:"#1a1630",borderRadius:8,border:`2px solid ${C.accent}55`}},[
+    d({style:{color:C.accent,fontWeight:700,fontSize:12,marginBottom:10,letterSpacing:".04em"}},["⚡ Seleziona su quale pacchetto scalare l'ingresso:"]),
+    d({style:{display:"flex",flexDirection:"column",gap:8}},
+      activePays.map(p=>{
+        const pUsed=usedForPack(member.attendances,p);
+        const pMax=p.entries||0,pRem=pMax-pUsed;
+        const pCost=dc(p);
+        const isSel=p.id===selPayId;
+        const pc=pRem<=0?C.danger:pRem<=2?C.warn:C.success;
+        return h("button",{
+          style:{
+            background:isSel?C.accent+"33":"transparent",
+            border:`2px solid ${isSel?C.accent:C.border}`,
+            borderRadius:8,padding:"10px 14px",cursor:"pointer",textAlign:"left",
+            width:"100%",transition:"all .15s",
+          },
+          onClick:()=>{S.regPayId=p.id;render();}
+        },[
+          d({style:{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8}},[
+            d({style:{display:"flex",alignItems:"center",gap:8}},[
+              d({style:{width:16,height:16,borderRadius:"50%",border:`2px solid ${isSel?C.accent:C.border}`,background:isSel?C.accent:"transparent",flexShrink:0}},[]),
+              d({style:{color:isSel?C.accent:C.text,fontWeight:700,fontSize:13}},[`${p.subType} (${p.entries} ing.)`]),
+            ]),
+            d({style:{display:"flex",alignItems:"center",gap:8}},[
+              d({style:{color:pc,fontWeight:800,fontSize:13}},[[`${pUsed}/${pMax} usati`]]),
+              pCost!=null?d({style:{color:C.success,fontWeight:700,fontSize:13}},[fmtE(pCost)]):""  ,
+              pRem<=0?tag(C.danger,"Esauriti"):pRem===1?tag(C.warn,"Ultimo!"):tag(C.success,`${pRem} rimasti`),
+            ]),
+          ]),
+          d({style:{color:C.muted,fontSize:11,marginTop:4}},[`Acquistato il ${fmt(p.date)} · €${p.amount}`]),
+        ]);
+      })
+    ),
+  ]):null;
+
+  // preview pacchetto selezionato (se singolo o dopo selezione)
+  const preview=member&&ap&&!multiPack?d({style:{marginTop:14,padding:"10px 14px",background:C.surface,borderRadius:8,border:`1px solid ${C.border}`,display:"flex",gap:16,flexWrap:"wrap",alignItems:"center"}},[
+    d({},[d({style:{color:C.muted,fontSize:10,textTransform:"uppercase",letterSpacing:".06em"}},["Iscritto"]),d({style:{color:C.text,fontWeight:600,fontSize:13}},[member.name])]),
+    d({},[d({style:{color:C.muted,fontSize:10,textTransform:"uppercase",letterSpacing:".06em"}},["Abbonamento"]),d({style:{color:C.accent,fontSize:12,fontWeight:600}},[`${ap.subType}${isE?` · ${max} ing.`:"" }`])]),
+    cost!=null?d({},[d({style:{color:C.muted,fontSize:10,textTransform:"uppercase",letterSpacing:".06em"}},["Valore seduta"]),d({style:{color:C.success,fontWeight:800,fontSize:15}},[fmtE(cost)])]):"",
+    isE&&max!=null?d({style:{textAlign:"center",padding:"4px 10px",background:ec+"18",borderRadius:8,border:`1px solid ${ec}44`}},[
+      d({style:{color:ec,fontWeight:800,fontSize:16,lineHeight:1}},[`${used}/${max}`]),
+      d({style:{color:C.muted,fontSize:9,textTransform:"uppercase",letterSpacing:".06em"}},["ingressi"]),
+    ]):"",
+    already?tag(C.warn,"⚠ Già segnato per questa data"):"",
+    !ap?tag(C.danger,"Nessun abbonamento attivo"):"",
+  ]):null;
+
+  return d({style:{background:C.card,borderRadius:12,border:`1px solid ${C.border}`,padding:20,marginBottom:16}},[
+    d({style:{color:C.accent,fontWeight:700,fontSize:13,letterSpacing:".06em",textTransform:"uppercase",marginBottom:14}},["🏃 Registra Ingresso"]),
+    d({style:{display:"grid",gridTemplateColumns:"1fr 1fr auto",gap:10,alignItems:"end"}},[
+      d({},[d({style:{color:C.muted,fontSize:11,marginBottom:4}},["Iscritto"]),mSel]),
+      d({},[d({style:{color:C.muted,fontSize:11,marginBottom:4}},["Data"]),dInp]),
+      segnBtn,
+    ]),
+    already?d({style:{marginTop:10,padding:"8px 12px",background:C.warn+"18",borderRadius:6,border:`1px solid ${C.warn}44`,color:C.warn,fontSize:12,fontWeight:600}},["⚠ Presenza già registrata per questa data"]):"",
+    activePays.length===0&&member?d({style:{marginTop:10,padding:"8px 12px",background:C.danger+"18",borderRadius:6,border:`1px solid ${C.danger}44`,color:C.danger,fontSize:12,fontWeight:600}},["Nessun abbonamento attivo per questa data"]):"",
+    packSelector,
+    preview,
+  ]);
+}
+
+function registerAtt(memberId,date,payId){
+  const m=S.members.find(x=>x.id===memberId);
+  if(!m||m.attendances.some(a=>a.date===date))return;
+  // salva l'ingresso con riferimento al pacchetto scelto
+  const newAtt=[...m.attendances,{id:uid(),date,payId:payId||null}];
+  const nm={...m,attendances:newAtt};
+  // usa il pacchetto specificato per il feedback
+  const ap=payId?m.payments.find(p=>p.id===payId):activePay(nm,date);
+  let ad=null;
+  if(ap&&isEP(ap.subType)){
+    const used=usedForPack(newAtt,ap);
+    const max=ap.entries||0,cost=dc(ap);
+    const cs=cost!=null?`\nValore seduta: ${fmtE(cost)}`:"";
+    if(used>=max)         ad={type:"renewal",message:`${m.name} ha terminato tutti i ${max} ingressi del pacchetto!\n\nRinnova l'abbonamento. 🔄`};
+    else if(used===max-1) ad={type:"renewal",message:`${m.name} ha usato ${used}/${max} ingressi del pacchetto.\n\n⚠️ Penultimo ingresso!${cs}`};
+    else                  ad={type:"ok",     message:`Ingresso registrato ✓\n${m.name} — ${fmt(date)}\nPacchetto: ${ap.subType} (${ap.entries} ing.)\n${used}/${max} ingressi usati${cs}`};
+  } else {
+    const cost=ap?dc(ap):null;
+    ad={type:"ok",message:`Ingresso registrato ✓\n${m.name} — ${fmt(date)}${cost!=null?`\nValore seduta: ${fmtE(cost)}`:""}`};
+  }
+  S.members=S.members.map(x=>x.id===memberId?nm:x);
+  persist();render();
+  if(ad)setTimeout(()=>{S.alert=ad;render();},60);
+}
+
+// ── CALENDAR ──────────────────────────────────────────────────────────────────
+function renderCalendar(){
+  const{calY:year,calM:month,calSel:selDay}=S;
+  const ts=today();
+  const MN=["Gen","Feb","Mar","Apr","Mag","Giu","Lug","Ago","Set","Ott","Nov","Dic"],DN=["Lu","Ma","Me","Gi","Ve","Sa","Do"];
+
+  const expMap={};
+  S.members.forEach(m=>m.payments.filter(p=>!isEP(p.subType)).forEach(p=>{if(p.endDate){if(!expMap[p.endDate])expMap[p.endDate]=[];expMap[p.endDate].push(m.name);}}));
+  const attMap={};
+  S.members.forEach(m=>m.attendances.forEach(a=>{const p=activePay(m,a.date);if(!attMap[a.date])attMap[a.date]=[];attMap[a.date].push({name:m.name,cost:p?dc(p):null});}));
+  const revMap={};Object.entries(attMap).forEach(([dd,l])=>{revMap[dd]=l.reduce((s,x)=>s+(x.cost||0),0);});
+  const pfx=`${year}-${String(month+1).padStart(2,"0")}`;
+  const mRev=Object.entries(revMap).filter(([dd])=>dd.startsWith(pfx)).reduce((s,[,v])=>s+v,0);
+
+  const cells=[];const off=(new Date(year,month,1).getDay()+6)%7;
+  for(let i=0;i<off;i++)cells.push(null);
+  for(let dd=1;dd<=new Date(year,month+1,0).getDate();dd++)cells.push(dd);
+
+  const grid=d({style:{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:2}},
+    cells.map((dd,i)=>{
+      if(!dd)return d({});
+      const ds=`${year}-${String(month+1).padStart(2,"0")}-${String(dd).padStart(2,"0")}`;
+      const isT=ds===ts,hasE=!!expMap[ds],hasA=!!attMap[ds],cnt=attMap[ds]?.length||0,rev=revMap[ds]||0,isSel=selDay===dd;
+      const cell=d({style:{borderRadius:6,padding:"4px 2px 3px",textAlign:"center",fontSize:12,cursor:"pointer",fontWeight:isT?"700":"400",
+        color:isSel?"#1a1508":isT?"#1a1508":hasE?C.warn:C.text,
+        background:isSel?C.info:isT?C.accent:hasA?C.success+"18":"transparent",
+        border:isSel?`1px solid ${C.info}`:isT?"none":hasE?`1px solid ${C.warn}55`:hasA?`1px solid ${C.success}44`:"1px solid transparent"}},[
+        String(dd),
+        hasA?d({style:{fontSize:9,color:isSel?"#1a1508":C.success,fontWeight:700,lineHeight:1}},[`${cnt}p`]):"",
+        hasA&&rev>0?d({style:{fontSize:8,color:isSel?"#1a1508":C.accent,fontWeight:600,lineHeight:1}},[fmtE(rev)]):"",
+        hasE&&!hasA?sp({style:{display:"block",width:4,height:4,borderRadius:"50%",background:C.warn,margin:"1px auto 0"}},[]):"",
+      ]);
+      cell.addEventListener("click",()=>setNoPersist({calSel:isSel?null:dd}));
+      return cell;
+    })
+  );
+
+  const selDs=selDay?`${year}-${String(month+1).padStart(2,"0")}-${String(selDay).padStart(2,"0")}`:null;
+  const selAtts=selDs?(attMap[selDs]||[]):[];const selExp=selDs?(expMap[selDs]||[]):[];const selRev=selDs?(revMap[selDs]||0):0;
+  const notYet=selDs?S.members.filter(m=>!m.attendances.some(a=>a.date===selDs)):[];
+
+  const selPanel=selDs?d({style:{background:C.card,borderRadius:12,border:`1px solid ${C.info}44`,padding:18}},[
+    d({style:{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8,marginBottom:14}},[
+      d({style:{color:C.info,fontWeight:700,fontSize:14}},[`📅 ${fmt(selDs)}`]),
+      selRev>0?d({style:{background:C.success+"18",border:`1px solid ${C.success}44`,borderRadius:8,padding:"4px 14px",color:C.success,fontWeight:800,fontSize:15}},[`Incasso: ${fmtE(selRev)}`]):"",
+    ]),
+    selAtts.length>0?d({style:{marginBottom:14}},[
+      d({style:{color:C.muted,fontSize:11,marginBottom:8,textTransform:"uppercase",letterSpacing:".06em"}},[`Presenti (${selAtts.length})`]),
+      d({style:{display:"flex",flexDirection:"column",gap:6}},selAtts.map(x=>
+        d({style:{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"7px 12px",background:C.surface,borderRadius:7,border:`1px solid ${C.border}`}},[
+          sp({style:{color:C.text,fontSize:13,fontWeight:500}},[x.name]),
+          x.cost!=null?sp({style:{color:C.success,fontWeight:700,fontSize:14}},[fmtE(x.cost)]):sp({style:{color:C.muted,fontSize:12}},["nessun pacchetto"]),
+        ])
+      )),
+    ]):"",
+    selExp.length>0?d({style:{marginBottom:12}},[
+      d({style:{color:C.muted,fontSize:11,marginBottom:6,textTransform:"uppercase",letterSpacing:".06em"}},["Scadenze"]),
+      d({style:{display:"flex",gap:6,flexWrap:"wrap"}},selExp.map(n=>tag(C.warn,n))),
+    ]):"",
+    selAtts.length===0&&selExp.length===0?d({style:{color:C.muted,fontSize:13,marginBottom:12}},["Nessuna presenza o scadenza."]):"",
+    d({style:{borderTop:`1px solid ${C.border}`,paddingTop:12}},[
+      d({style:{color:C.muted,fontSize:11,marginBottom:8}},["Segna ingresso rapido:"]),
+      notYet.length===0?sp({style:{color:C.muted,fontSize:12}},["Tutti già segnati."]):
+        d({style:{display:"flex",gap:6,flexWrap:"wrap"}},notYet.map(m=>{
+          const b=h("button",{style:{background:C.success+"18",color:C.success,border:`1px solid ${C.success}44`,borderRadius:6,padding:"4px 12px",fontSize:12,fontFamily:"inherit",fontWeight:600,cursor:"pointer"},
+            onClick:()=>registerAtt(m.id,selDs)},[`+ ${m.name.split(" ")[0]}`]);
+          return b;
+        })),
+    ]),
+  ]):null;
+
+  return d({style:{display:"flex",flexDirection:"column",gap:16}},[
+    d({style:{background:C.card,borderRadius:12,border:`1px solid ${C.border}`,padding:20}},[
+      d({style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16,flexWrap:"wrap",gap:8}},[
+        h("button",{style:{background:"transparent",color:C.muted,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 12px",fontSize:12,cursor:"pointer",fontWeight:600},
+          onClick:()=>setNoPersist(month===0?{calY:year-1,calM:11,calSel:null}:{calM:month-1,calSel:null})},["◀"]),
+        d({style:{textAlign:"center"}},[
+          sp({style:{color:C.text,fontWeight:700,fontSize:15}},[`${MN[month]} ${year}`]),
+          mRev>0?d({style:{color:C.success,fontSize:11,fontWeight:600,marginTop:2}},[`Incassi mese: ${fmtE(mRev)}`]):"",
+        ]),
+        h("button",{style:{background:"transparent",color:C.muted,border:`1px solid ${C.border}`,borderRadius:6,padding:"5px 12px",fontSize:12,cursor:"pointer",fontWeight:600},
+          onClick:()=>setNoPersist(month===11?{calY:year+1,calM:0,calSel:null}:{calM:month+1,calSel:null})},["▶"]),
+      ]),
+      d({style:{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:2,marginBottom:4}},DN.map(dd=>d({style:{textAlign:"center",fontSize:11,color:C.muted,fontWeight:600,padding:"3px 0"}},[dd]))),
+      grid,
+      d({style:{marginTop:14,display:"flex",gap:14,flexWrap:"wrap"}},[
+        ...[{c:C.accent,l:"Oggi"},{c:C.success,l:"Presenze"},{c:C.warn,l:"Scadenza"},{c:C.info,l:"Selezionato"}].map(x=>
+          d({style:{display:"flex",alignItems:"center",gap:5,fontSize:11,color:C.muted}},[
+            sp({style:{width:7,height:7,borderRadius:"50%",background:x.c,display:"inline-block"}},[]),x.l
+          ])
+        )
+      ]),
+    ]),
+    selPanel,
+  ]);
+}
+
+// ── STATS ─────────────────────────────────────────────────────────────────────
+function renderStats(){
+  const ts=today(),ym=ymNow();
+  const active=S.members.filter(m=>{const s=mStatus(m);return s&&(s.type==="time"?s.dl>=0:s.max-s.used>0);}).length;
+  const todayA=S.members.reduce((s,m)=>s+m.attendances.filter(a=>a.date===ts).length,0);
+  const revT=S.members.reduce((s,m)=>s+m.attendances.filter(a=>a.date===ts).reduce((ss,a)=>{const p=activePay(m,a.date);return ss+(p?dc(p):0);},0),0);
+  const revM=S.members.reduce((s,m)=>s+m.attendances.filter(a=>a.date.startsWith(ym)).reduce((ss,a)=>{const p=activePay(m,a.date);return ss+(p?dc(p):0);},0),0);
+  return d({style:{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:8,marginBottom:18}},[
+    ...[{l:"Iscritti",v:S.members.length,c:C.accent},{l:"Attivi",v:active,c:C.success},{l:"Oggi",v:todayA,c:C.info},{l:"Ricavi oggi",v:fmtE(revT)||"€0,00",c:C.success},{l:"Ricavi mese",v:fmtE(revM)||"€0,00",c:C.accent}].map(s=>
+      d({style:{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 8px",textAlign:"center"}},[
+        d({style:{color:s.c,fontWeight:800,fontSize:18}},[String(s.v)]),
+        d({style:{color:C.muted,fontSize:9,marginTop:3,letterSpacing:".04em",textTransform:"uppercase",lineHeight:1.3}},[s.l]),
+      ])
+    )
+  ]);
+}
+
+// ── MAIN RENDER ───────────────────────────────────────────────────────────────
+function render(){
+  const app=document.getElementById("root");
+  while(app.firstChild)app.removeChild(app.firstChild);
+
+  const wrap=d({style:{maxWidth:900,margin:"0 auto",padding:"24px 16px",minHeight:"100vh"}});
+
+  // header
+  wrap.appendChild(d({style:{marginBottom:22}},[
+    d({style:{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10}},[
+      d({},[
+        d({style:{color:C.accent,fontSize:11,letterSpacing:".12em",fontWeight:700,textTransform:"uppercase",marginBottom:2}},["✦ Personaline"]),
+        h("h1",{style:{margin:0,fontSize:22,fontWeight:800,color:C.text,letterSpacing:"-.02em"}},["Gestione Abbonamenti"]),
+        d({style:{color:C.success,fontSize:10,marginTop:3,letterSpacing:".04em"}},["💾 Dati salvati automaticamente"]),
+      ]),
+      h("button",{style:{background:C.accent,color:"#1a1508",border:"none",borderRadius:6,padding:"8px 18px",fontSize:13,cursor:"pointer",fontWeight:600},onClick:()=>set({showAddMember:true})},["+ Nuovo iscritto"]),
+    ])
+  ]));
+
+  wrap.appendChild(renderStats());
+
+  // tabs
+  const tabBar=d({style:{display:"flex",gap:4,marginBottom:18,background:C.surface,borderRadius:8,padding:4,width:"fit-content",border:`1px solid ${C.border}`}});
+  [{k:"members",l:"👥 Iscritti"},{k:"attendance",l:"✅ Presenze"},{k:"calendar",l:"📅 Calendario"}].forEach(t=>{
+    const b=h("button",{style:{background:S.tab===t.k?C.accent:"transparent",color:S.tab===t.k?"#1a1508":C.muted,border:"none",borderRadius:6,padding:"7px 16px",fontFamily:"inherit",fontWeight:600,fontSize:13,cursor:"pointer"},onClick:()=>set({tab:t.k})},[t.l]);
+    tabBar.appendChild(b);
+  });
+  wrap.appendChild(tabBar);
+
+  // content
+  if(S.tab==="members"){
+    // search + filters
+    const sfRow=d({style:{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap",alignItems:"center"}});
+    const sInp=h("input",{type:"text",value:S.search,placeholder:"🔍 Cerca iscritto...",style:{background:C.bg,border:`1px solid ${C.border}`,borderRadius:6,padding:"7px 10px",color:C.text,fontSize:13,fontFamily:"inherit",outline:"none",width:"100%",flex:1,minWidth:"180px"}});
+    sInp.addEventListener("input",e=>{S.search=e.target.value;render();});
+    sfRow.appendChild(d({style:{flex:1,minWidth:"180px"}},[sInp]));
+    const fbRow=d({style:{display:"flex",gap:4,flexWrap:"wrap"}});
+    [{k:"all",l:"Tutti"},{k:"active",l:"Attivi"},{k:"expiring",l:"In scadenza"},{k:"expired",l:"Esauriti/Scaduti"}].forEach(f=>{
+      fbRow.appendChild(h("button",{style:{background:S.filter===f.k?C.asoft:"transparent",color:S.filter===f.k?C.accent:C.muted,border:`1px solid ${S.filter===f.k?C.accent+"55":C.border}`,borderRadius:6,padding:"5px 12px",fontSize:12,fontWeight:600,cursor:"pointer"},onClick:()=>set({filter:f.k})},[f.l]));
+    });
+    sfRow.appendChild(fbRow);
+    wrap.appendChild(sfRow);
+
+    let list=S.members;
+    if(S.search.trim())list=list.filter(m=>m.name.toLowerCase().includes(S.search.toLowerCase()));
+    if(S.filter==="active")list=list.filter(m=>{const s=mStatus(m);return s&&(s.type==="time"?s.dl>=0:s.max-s.used>0);});
+    else if(S.filter==="expiring")list=list.filter(m=>{const s=mStatus(m);return s&&s.type==="time"&&s.dl>=0&&s.dl<=7;});
+    else if(S.filter==="expired")list=list.filter(m=>{const s=mStatus(m);return!s||(s.type==="time"?s.dl<0:s.max-s.used<=0);});
+
+    if(list.length===0){
+      wrap.appendChild(d({style:{color:C.muted,textAlign:"center",padding:"40px 0",fontSize:14}},[S.members.length===0?"Nessun iscritto. Aggiungi il primo! 👆":"Nessun risultato."]));
+    } else {
+      const listEl=d({style:{display:"flex",flexDirection:"column",gap:8}});
+      list.forEach(m=>listEl.appendChild(renderMemberCard(m)));
+      wrap.appendChild(listEl);
+    }
+  } else if(S.tab==="attendance"){
+    wrap.appendChild(renderRegister());
+    // today summary
+    const present=S.members.filter(m=>m.attendances.some(a=>a.date===today()));
+    const sumBox=d({style:{background:C.card,borderRadius:12,border:`1px solid ${C.border}`,padding:18}},[
+      d({style:{color:C.accent,fontWeight:700,fontSize:13,letterSpacing:".06em",textTransform:"uppercase",marginBottom:14}},[`📋 Presenze oggi — ${fmt(today())}`]),
+    ]);
+    if(present.length===0){
+      sumBox.appendChild(d({style:{color:C.muted,fontSize:13}},["Nessuna presenza oggi."]));
+    } else {
+      const rows=d({style:{display:"flex",flexDirection:"column",gap:8}});
+      present.forEach(m=>{
+        const ap=activePay(m,today()),isE=ap?isEP(ap.subType):false;
+        const used=isE&&ap?m.attendances.filter(a=>a.date>=ap.startDate&&a.date<=today()).length:null;
+        const max=ap?.entries??null,rem=used!=null&&max!=null?max-used:null,cost=ap?dc(ap):null;
+        const ec=rem===null?C.muted:rem<=0?C.danger:rem<=2?C.warn:C.success;
+        // trova l'id della seduta di oggi per questo membro
+        const todayAtt=m.attendances.find(a=>a.date===today());
+        rows.appendChild(d({style:{display:"flex",alignItems:"center",gap:12,padding:"10px 14px",background:C.surface,borderRadius:8,border:`1px solid ${C.border}`}},[
+          d({style:{width:32,height:32,borderRadius:"50%",background:C.success+"22",border:`1.5px solid ${C.success}44`,display:"flex",alignItems:"center",justifyContent:"center",color:C.success,fontWeight:700,fontSize:12,flexShrink:0}},[ini(m.name)]),
+          d({style:{flex:1}},[d({style:{color:C.text,fontWeight:600,fontSize:13}},[m.name]),ap?d({style:{color:C.muted,fontSize:11}},[`${ap.subType}${isE?` · ${max} ing.`:""}`]):"" ]),
+          cost!=null?d({style:{color:C.success,fontWeight:700,fontSize:14}},[fmtE(cost)]):"",
+          isE&&max!=null?d({style:{textAlign:"center",padding:"3px 10px",background:ec+"18",borderRadius:6,border:`1px solid ${ec}44`}},[d({style:{color:ec,fontWeight:800,fontSize:14}},[`${used}/${max}`]),d({style:{color:C.muted,fontSize:9,textTransform:"uppercase"}},["ingressi"])]):"",
+          rem===0?tag(C.danger,"🔔 Rinnova!"):"",
+          rem===1?tag(C.warn,"⚠ Penultimo"):"",
+          // pulsante elimina seduta di oggi
+          todayAtt?h("button",{
+            style:{background:C.danger+"22",color:C.danger,border:`1px solid ${C.danger}44`,borderRadius:6,padding:"4px 10px",fontSize:11,cursor:"pointer",fontWeight:600,flexShrink:0},
+            onClick:()=>set({confirm:{msg:`Eliminare la seduta di oggi di ${m.name}?`,onOk:()=>{
+              S.members=S.members.map(x=>x.id===m.id?{...x,attendances:x.attendances.filter(a=>a.id!==todayAtt.id)}:x);
+              persist();render();
+            }}})
+          },["✕ Annulla seduta"]):"",
+        ]));
+      });
+      sumBox.appendChild(rows);
+    }
+    wrap.appendChild(sumBox);
+  } else {
+    wrap.appendChild(renderCalendar());
+  }
+
+  // footer
+  wrap.appendChild(d({style:{marginTop:40,textAlign:"center",color:C.border,fontSize:10,letterSpacing:".06em"}},["PERSONALINE · GESTIONE CENTRO PILATES"]));
+
+  app.appendChild(wrap);
+
+  // modals on top
+  if(S.showAddMember||S.editMemberId) app.appendChild(renderMemberModal());
+  const alertEl=renderAlert();if(alertEl)app.appendChild(alertEl);
+  const confEl=renderConfirm();if(confEl)app.appendChild(confEl);
+}
+
+render();
+</script>
+</body>
+</html>
