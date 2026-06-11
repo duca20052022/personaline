@@ -104,9 +104,15 @@ const MI={Cash:"💵",Carta:"💳",Bonifico:"🏦",Satispay:"📱"};
 const activePay=(member,date)=>{
   const sorted=[...member.payments].sort((a,b)=>b.startDate.localeCompare(a.startDate));
   for(const p of sorted){
-    if(p.startDate>date)continue;
-    if(!isEP(p.subType)){if(p.endDate&&p.endDate>=date)return p;}
-    else{const used=usedForPack(member.attendances,p);if(used<(p.entries||0))return p;}
+    // per pacchetti temporali (mensile/trimestrale): rispetta la data di inizio
+    if(!isEP(p.subType)){
+      if(p.startDate>date)continue;
+      if(p.endDate&&p.endDate>=date)return p;
+    } else {
+      // pacchetti a ingressi: disponibile indipendentemente dalla data (retroattivo)
+      const used=usedForPack(member.attendances,p);
+      if(used<(p.entries||0))return p;
+    }
   }
   return null;
 };
@@ -564,10 +570,15 @@ function renderTrainers(){
 // Trova tutti i pacchetti attivi per una data (non solo il primo)
 function activePayments(member, date){
   return member.payments.filter(p=>{
-    if(p.startDate>date)return false;
-    if(!isEP(p.subType))return p.endDate&&p.endDate>=date;
-    const used=usedForPack(member.attendances,p);
-    return used<(p.entries||0);
+    if(!isEP(p.subType)){
+      // temporali: rispetta intervallo date
+      if(p.startDate>date)return false;
+      return p.endDate&&p.endDate>=date;
+    } else {
+      // pacchetti ingressi: sempre disponibili se non esauriti (retroattivo)
+      const used=usedForPack(member.attendances,p);
+      return used<(p.entries||0);
+    }
   });
 }
 
