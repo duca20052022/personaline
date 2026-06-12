@@ -445,47 +445,75 @@ function renderMemberCard(m){
   ]);
 }
 
-// ── TRAINER MANAGEMENT ───────────────────────────────────────────────────────
 function renderTrainers(){
   const trainerColors=["#c8a96e","#6ea8c8","#5cb87a","#e0a050","#c86e9e","#9e6ec8"];
   const getColor=(i)=>trainerColors[i%trainerColors.length];
+  const MN=["Gen","Feb","Mar","Apr","Mag","Giu","Lug","Ago","Set","Ott","Nov","Dic"];
 
-  // riepilogo totali trainer
-  const ym=ymNow();
-  const totSedute=S.members.reduce((tot,m)=>tot+m.attendances.filter(a=>a.trainers&&a.trainers.length>0).length,0);
-  const totFatturato=S.trainers.reduce((tot,t)=>{
-    return tot+S.members.reduce((s,m)=>{
-      return s+m.attendances.filter(a=>a.trainers&&a.trainers.includes(t.id)).reduce((ss,a)=>{
-        const p=a.payId?m.payments.find(pp=>pp.id===a.payId):activePay(m,a.date);
-        const costo=p?dc(p):0;
-        return ss+(costo/(a.trainers.length||1));
-      },0);
+  // mese selezionato (default: mese corrente)
+  if(!S.trainerYM) S.trainerYM=ymNow();
+  const ym=S.trainerYM;
+  const [ymYear,ymMonth]=ym.split("-").map(Number);
+
+  // helper fatturato per trainer in un periodo
+  const fatturatoTrainer=(t,filter)=>S.members.reduce((tot,m)=>{
+    return tot+m.attendances.filter(a=>filter(a)&&a.trainers&&a.trainers.includes(t.id)).reduce((ss,a)=>{
+      const p=a.payId?m.payments.find(pp=>pp.id===a.payId):activePay(m,a.date);
+      const costo=p?dc(p):0;
+      return ss+(costo/(a.trainers.length||1));
     },0);
   },0);
-  const totMese=S.trainers.reduce((tot,t)=>{
-    return tot+S.members.reduce((s,m)=>{
-      return s+m.attendances.filter(a=>a.date.startsWith(ym)&&a.trainers&&a.trainers.includes(t.id)).reduce((ss,a)=>{
-        const p=a.payId?m.payments.find(pp=>pp.id===a.payId):activePay(m,a.date);
-        const costo=p?dc(p):0;
-        return ss+(costo/(a.trainers.length||1));
-      },0);
-    },0);
-  },0);
+  const seduteTrainer=(t,filter)=>S.members.reduce((tot,m)=>
+    tot+m.attendances.filter(a=>filter(a)&&a.trainers&&a.trainers.includes(t.id)).length,0);
 
-  const summaryBox=S.trainers.length>0?d({style:{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:16}},[
-    d({style:{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"14px 8px",textAlign:"center"}},[
-      d({style:{color:C.accent,fontWeight:800,fontSize:22}},[String(S.trainers.length)]),
-      d({style:{color:C.muted,fontSize:9,marginTop:3,letterSpacing:".04em",textTransform:"uppercase"}},["Trainer attivi"]),
-    ]),
-    d({style:{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"14px 8px",textAlign:"center"}},[
-      d({style:{color:C.success,fontWeight:800,fontSize:22}},[totMese>0?fmtE(totMese):"€0,00"]),
-      d({style:{color:C.muted,fontSize:9,marginTop:3,letterSpacing:".04em",textTransform:"uppercase"}},["Fatturato mese"]),
-    ]),
-    d({style:{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"14px 8px",textAlign:"center"}},[
-      d({style:{color:C.accent,fontWeight:800,fontSize:22}},[totFatturato>0?fmtE(totFatturato):"€0,00"]),
-      d({style:{color:C.muted,fontSize:9,marginTop:3,letterSpacing:".04em",textTransform:"uppercase"}},["Fatturato totale"]),
-    ]),
-  ]):null;
+  const filterMese=(a)=>a.date.startsWith(ym);
+  const filterTotale=(a)=>true;
+
+  // navigazione mese
+  const prevM=()=>{
+    const d=new Date(ymYear,ymMonth-1,1);d.setMonth(d.getMonth()-1);
+    S.trainerYM=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;render();
+  };
+  const nextM=()=>{
+    const d=new Date(ymYear,ymMonth-1,1);d.setMonth(d.getMonth()+1);
+    const next=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
+    if(next<=ymNow()){S.trainerYM=next;render();}
+  };
+  const isCurrentMonth=ym===ymNow();
+
+  // totali del mese selezionato
+  const totMese=S.trainers.reduce((tot,t)=>tot+fatturatoTrainer(t,filterMese),0);
+  const totSeduteMese=S.members.reduce((tot,m)=>tot+m.attendances.filter(a=>filterMese(a)&&a.trainers&&a.trainers.length>0).length,0);
+  const totFatturato=S.trainers.reduce((tot,t)=>tot+fatturatoTrainer(t,filterTotale),0);
+
+  // box navigazione mese + totali
+  const summaryBox=S.trainers.length>0?d({style:{marginBottom:16}}):[null];
+  if(S.trainers.length>0){
+    // navigator mese
+    summaryBox.appendChild(d({style:{display:"flex",alignItems:"center",justifyContent:"space-between",background:C.card,borderRadius:10,border:`1px solid ${C.border}`,padding:"12px 16px",marginBottom:10}},[
+      h("button",{style:{background:"transparent",color:C.muted,border:`1px solid ${C.border}`,borderRadius:6,padding:"4px 12px",fontSize:13,cursor:"pointer",fontWeight:600},onClick:prevM},["◀"]),
+      d({style:{textAlign:"center"}},[
+        d({style:{color:C.text,fontWeight:700,fontSize:16}},[`${MN[ymMonth-1]} ${ymYear}`]),
+        d({style:{color:C.muted,fontSize:10,marginTop:2,letterSpacing:".06em",textTransform:"uppercase"}},[isCurrentMonth?"Mese corrente":"Mese selezionato"]),
+      ]),
+      h("button",{style:{background:"transparent",color:isCurrentMonth?C.border:C.muted,border:`1px solid ${isCurrentMonth?C.border+"33":C.border}`,borderRadius:6,padding:"4px 12px",fontSize:13,cursor:isCurrentMonth?"not-allowed":"pointer",fontWeight:600,opacity:isCurrentMonth?.4:1},onClick:nextM},["▶"]),
+    ]));
+    // stats del mese
+    summaryBox.appendChild(d({style:{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:10}},[
+      d({style:{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"14px 8px",textAlign:"center"}},[
+        d({style:{color:C.accent,fontWeight:800,fontSize:22}},[String(S.trainers.length)]),
+        d({style:{color:C.muted,fontSize:9,marginTop:3,letterSpacing:".04em",textTransform:"uppercase"}},["Trainer attivi"]),
+      ]),
+      d({style:{background:C.card,border:`1px solid ${C.success}33}`,borderRadius:10,padding:"14px 8px",textAlign:"center"}},[
+        d({style:{color:C.success,fontWeight:800,fontSize:22}},[totMese>0?fmtE(totMese):"€0,00"]),
+        d({style:{color:C.muted,fontSize:9,marginTop:3,letterSpacing:".04em",textTransform:"uppercase"}},[`Fatturato ${MN[ymMonth-1]}`]),
+      ]),
+      d({style:{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"14px 8px",textAlign:"center"}},[
+        d({style:{color:C.accent,fontWeight:800,fontSize:20}},[totFatturato>0?fmtE(totFatturato):"€0,00"]),
+        d({style:{color:C.muted,fontSize:9,marginTop:3,letterSpacing:".04em",textTransform:"uppercase"}},["Fatturato totale"]),
+      ]),
+    ]));
+  }
 
   const addBox=d({style:{background:C.card,borderRadius:12,border:`1px solid ${C.border}`,padding:20,marginBottom:16}},[
     d({style:{color:C.accent,fontWeight:700,fontSize:13,letterSpacing:".06em",textTransform:"uppercase",marginBottom:14}},["👤 Aggiungi Trainer"]),
@@ -519,33 +547,43 @@ function renderTrainers(){
     const grid=d({style:{display:"flex",flexDirection:"column",gap:8}});
     S.trainers.forEach((t,i)=>{
       const col=getColor(i);
-      // conta sedute e fatturato di questo trainer
-      const sedute=S.members.reduce((tot,m)=>tot+m.attendances.filter(a=>a.trainers&&a.trainers.includes(t.id)).length,0);
-      const fatturato=S.members.reduce((tot,m)=>{
-        return tot+m.attendances
-          .filter(a=>a.trainers&&a.trainers.includes(t.id))
-          .reduce((s,a)=>{
-            const p=a.payId?m.payments.find(pp=>pp.id===a.payId):activePay(m,a.date);
-            const costo=p?dc(p):0;
-            // se la seduta ha 2 trainer, il fatturato si divide per 2
-            const divisore=a.trainers.length>1?a.trainers.length:1;
-            return s+(costo/divisore);
-          },0);
-      },0);
+      const seduteMese=seduteTrainer(t,filterMese);
+      const fatMese=fatturatoTrainer(t,filterMese);
+      const fatTot=fatturatoTrainer(t,filterTotale);
+      const seduteTot=seduteTrainer(t,filterTotale);
+
       grid.appendChild(d({style:{display:"flex",alignItems:"center",gap:12,padding:"12px 14px",background:C.surface,borderRadius:8,border:`1px solid ${C.border}`}},[
         d({style:{width:40,height:40,borderRadius:"50%",background:col+"22",border:`2px solid ${col}55`,display:"flex",alignItems:"center",justifyContent:"center",color:col,fontWeight:800,fontSize:15,flexShrink:0}},[t.name.split(" ").map(w=>w[0]).slice(0,2).join("").toUpperCase()]),
         d({style:{flex:1}},[
           d({style:{color:C.text,fontWeight:600,fontSize:14}},[t.name]),
           t.spec?d({style:{color:C.muted,fontSize:11,marginTop:1}},[t.spec]):"",
         ]),
-        d({style:{display:"flex",gap:8,flexShrink:0,alignItems:"center"}},[
-          d({style:{textAlign:"center",padding:"3px 10px",background:C.info+"18",borderRadius:6,border:`1px solid ${C.info}33`}},[
-            d({style:{color:C.info,fontWeight:800,fontSize:14,lineHeight:1}},[String(sedute)]),
-            d({style:{color:C.muted,fontSize:9,textTransform:"uppercase"}},["sedute"]),
+        // badge mese
+        d({style:{display:"flex",flexDirection:"column",gap:4,alignItems:"center",flexShrink:0}},[
+          d({style:{color:C.muted,fontSize:8,textTransform:"uppercase",letterSpacing:".04em"}},[MN[ymMonth-1]]),
+          d({style:{display:"flex",gap:6}},[
+            d({style:{textAlign:"center",padding:"3px 8px",background:C.info+"18",borderRadius:6,border:`1px solid ${C.info}33`}},[
+              d({style:{color:C.info,fontWeight:800,fontSize:13,lineHeight:1}},[String(seduteMese)]),
+              d({style:{color:C.muted,fontSize:8,textTransform:"uppercase"}},["sed."]),
+            ]),
+            d({style:{textAlign:"center",padding:"3px 8px",background:C.success+"18",borderRadius:6,border:`1px solid ${C.success}33`}},[
+              d({style:{color:C.success,fontWeight:800,fontSize:12,lineHeight:1}},[fatMese>0?fmtE(fatMese):"€0"]),
+              d({style:{color:C.muted,fontSize:8,textTransform:"uppercase"}},["mese"]),
+            ]),
           ]),
-          d({style:{textAlign:"center",padding:"3px 10px",background:C.success+"18",borderRadius:6,border:`1px solid ${C.success}33`}},[
-            d({style:{color:C.success,fontWeight:800,fontSize:13,lineHeight:1}},[fatturato>0?fmtE(fatturato):"€0,00"]),
-            d({style:{color:C.muted,fontSize:9,textTransform:"uppercase"}},["fatturato"]),
+        ]),
+        // badge totale
+        d({style:{display:"flex",flexDirection:"column",gap:4,alignItems:"center",flexShrink:0}},[
+          d({style:{color:C.muted,fontSize:8,textTransform:"uppercase",letterSpacing:".04em"}},["Totale"]),
+          d({style:{display:"flex",gap:6}},[
+            d({style:{textAlign:"center",padding:"3px 8px",background:C.muted+"18",borderRadius:6,border:`1px solid ${C.muted}33`}},[
+              d({style:{color:C.muted,fontWeight:800,fontSize:13,lineHeight:1}},[String(seduteTot)]),
+              d({style:{color:C.muted,fontSize:8,textTransform:"uppercase"}},["sed."]),
+            ]),
+            d({style:{textAlign:"center",padding:"3px 8px",background:C.accent+"18",borderRadius:6,border:`1px solid ${C.accent}33`}},[
+              d({style:{color:C.accent,fontWeight:800,fontSize:12,lineHeight:1}},[fatTot>0?fmtE(fatTot):"€0"]),
+              d({style:{color:C.muted,fontSize:8,textTransform:"uppercase"}},["tot."]),
+            ]),
           ]),
         ]),
         h("button",{style:{background:"transparent",color:C.info,border:`1px solid ${C.info}44`,borderRadius:6,padding:"4px 10px",fontSize:11,cursor:"pointer",fontWeight:600},
@@ -563,7 +601,7 @@ function renderTrainers(){
     listBox.appendChild(grid);
   }
 
-  return d({},[summaryBox,addBox,listBox]);
+  return d({},[S.trainers.length>0?summaryBox:null,addBox,listBox]);
 }
 
 // ── REGISTER ──────────────────────────────────────────────────────────────────
